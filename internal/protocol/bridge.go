@@ -201,12 +201,13 @@ func responsesTextFormat(format any) any {
 // "max" was served as "high".
 func reasoningEffort(value any) any {
 	if object, ok := value.(map[string]any); ok {
+		if jsonutil.StringAt(object, "type") == "disabled" {
+			return "none"
+		}
 		if effort, ok := explicitEffort(object); ok {
 			return effort
 		}
 		switch jsonutil.StringAt(object, "type") {
-		case "disabled":
-			return nil
 		case "enabled", "adaptive":
 			return effortForThinkingBudget(jsonutil.IntAt(object, "budget_tokens"))
 		default:
@@ -224,9 +225,8 @@ func reasoningEffort(value any) any {
 // budget, including inside a thinking block that also has budget_tokens:
 // budget 2048 plus effort "max" is a request for "max", not for "low".
 //
-// The second return is ok, not "effort != nil": the stated value nil means the
-// client named "none"/"disabled" explicitly, which must clear an inferred level
-// rather than fall through to it.
+// An explicit "none"/"disabled" remains "none", rather than falling through
+// to an inferred level or becoming indistinguishable from an unset value.
 func explicitEffort(object map[string]any) (any, bool) {
 	for _, key := range []string{"effort", "reasoning_effort"} {
 		if value, exists := object[key]; exists {
@@ -241,7 +241,7 @@ func explicitEffort(object map[string]any) (any, bool) {
 // normalizeEffortValue validates an effort a client stated explicitly. A
 // non-empty string is passed through verbatim (case preserved) so unsupported
 // levels are not silently rewritten or dropped; only "none"/"disabled" mean
-// "no reasoning" and clear the value. Everything else, nil included, reports
+// "no reasoning" and become "none". Everything else, nil included, reports
 // ok=false so the caller can fall back to a budget-derived level.
 func normalizeEffortValue(value any) (any, bool) {
 	text, ok := value.(string)
@@ -250,9 +250,7 @@ func normalizeEffortValue(value any) (any, bool) {
 	}
 	switch strings.ToLower(strings.TrimSpace(text)) {
 	case "none", "disabled":
-		// Explicitly no reasoning: clear any inferred level instead of
-		// resurrecting one from a budget.
-		return nil, true
+		return "none", true
 	case "":
 		return nil, false
 	}
@@ -275,30 +273,22 @@ func anthropicThinking(value any) (any, map[string]any) {
 	if value == nil {
 		return nil, nil
 	}
+	if reasoningEffort(value) == "none" {
+		return map[string]any{"type": "disabled"}, nil
+	}
 	budget := 0
 	if object, ok := value.(map[string]any); ok {
-		kind := jsonutil.StringAt(object, "type")
 		// A budget is what makes the round trip lossless, so it is read before
 		// the effort: a value that reached the bridge as a thinking block still
 		// names the budget the client sent, and re-deriving one from the level
 		// would fold 32000 back down to the 16384 rung.
 		budget = jsonutil.IntAt(object, "budget_tokens")
 		if effort, stated := explicitEffort(object); stated {
-			// "none"/"disabled" clears the reasoning configuration entirely.
-			if effort == nil {
-				return nil, nil
-			}
 			return thinkingFor(effort, budget), map[string]any{"effort": effort}
-		}
-		if kind == "disabled" {
-			return nil, nil
 		}
 		// A level carried in "type" (Chat's {"reasoning":{"type":"high"}}), or a
 		// one-sided {"type":"enabled"} whose only control is its budget.
 		if effort, stated := normalizeEffortValue(object["type"]); stated {
-			if effort == nil {
-				return nil, nil
-			}
 			return thinkingFor(effort, budget), map[string]any{"effort": effort}
 		}
 		if budget > 0 {
@@ -320,10 +310,6 @@ func anthropicThinking(value any) (any, map[string]any) {
 		}
 		// Not an effort string (for example a bool): nothing to say about
 		// reasoning, so stay silent rather than inventing a level.
-		return nil, nil
-	}
-	if effort == nil {
-		// "none"/"disabled".
 		return nil, nil
 	}
 	return thinkingFor(effort, budget), map[string]any{"effort": effort}

@@ -39,7 +39,7 @@ func PrepareRequest(from, to Protocol, input map[string]any, upstreamURL string)
 // rather than to the bridge value because the same-protocol path never goes
 // through the bridge, and only there can the client's own body be seen.
 func ForcedEffort(protocol Protocol, body map[string]any, effort string) {
-	if body == nil {
+	if body == nil || requestDisablesReasoning(protocol, body) {
 		return
 	}
 	effort = strings.ToLower(strings.TrimSpace(effort))
@@ -76,6 +76,27 @@ func ForcedEffort(protocol Protocol, body map[string]any, effort string) {
 			body["reasoning"] = reasoning
 		}
 		reasoning["effort"] = effort
+	}
+}
+
+// A native thinking switch is just as explicit as an effort string. Check the
+// original input during decoding and the prepared body before applying defaults
+// so same-protocol passthrough and cross-protocol requests both retain it.
+func requestDisablesReasoning(protocol Protocol, body map[string]any) bool {
+	switch protocol {
+	case Chat:
+		return reasoningEffort(body["thinking"]) == "none" ||
+			reasoningEffort(body["reasoning_effort"]) == "none" ||
+			reasoningEffort(body["reasoning"]) == "none"
+	case Responses:
+		return reasoningEffort(body["reasoning"]) == "none" ||
+			reasoningEffort(body["reasoning_effort"]) == "none"
+	case Anthropic:
+		return reasoningEffort(body["thinking"]) == "none" ||
+			reasoningEffort(body["output_config"]) == "none" ||
+			reasoningEffort(body["effort"]) == "none"
+	default:
+		return false
 	}
 }
 
@@ -332,8 +353,8 @@ func anthropicReasoning(input map[string]any) any {
 	if effort, ok := normalizeEffortValue(stated); ok {
 		// The explicit effort survives next to the thinking block's budget so
 		// nothing the client said is lost on the way to the bridge.
-		if effort == nil {
-			return nil
+		if effort == "none" {
+			return effort
 		}
 		if thinking, ok := input["thinking"].(map[string]any); ok {
 			merged := make(map[string]any, len(thinking)+1)
@@ -575,6 +596,9 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 
 	default:
 		return request, fmt.Errorf("unsupported input protocol %q", protocol)
+	}
+	if requestDisablesReasoning(protocol, input) {
+		request.Reasoning = "none"
 	}
 	for i := range request.Messages {
 		for j := range request.Messages[i].Blocks {
@@ -894,9 +918,6 @@ func missingToolIDs(order []string, pending map[string]bool) []string {
 // no reasoning configuration at all.
 func responsesReasoning(value any) any {
 	if object, ok := value.(map[string]any); ok {
-		if jsonutil.StringAt(object, "type") == "disabled" {
-			return object
-		}
 		// "effort" is authoritative here for the same reason as in
 		// encodeChatRequest: it either came from the client verbatim or was
 		// derived from the budget by reasoningEffort.
@@ -915,9 +936,6 @@ func responsesReasoning(value any) any {
 	switch typed := value.(type) {
 	case string:
 		if effort, ok := normalizeEffortValue(typed); ok {
-			if effort == nil {
-				return nil
-			}
 			return map[string]any{"effort": effort}
 		}
 		return map[string]any{"effort": typed}
